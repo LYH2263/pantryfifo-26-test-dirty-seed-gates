@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import date, datetime, timezone
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -56,8 +57,18 @@ class LotIn(BaseModel):
     qty: float
     expiry: str
 
+EXPIRY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 @app.post("/api/lots")
 def inbound(body: LotIn):
+    if body.qty <= 0:
+        raise HTTPException(400, "qty_non_positive")
+    if not EXPIRY_RE.match(body.expiry or ""):
+        raise HTTPException(400, "expiry_invalid")
+    try:
+        date.fromisoformat(body.expiry)
+    except ValueError:
+        raise HTTPException(400, "expiry_invalid")
     c = connect()
     item = c.execute("SELECT id FROM items WHERE id=?", (body.item_id,)).fetchone()
     if not item: c.close(); raise HTTPException(404, "item")
@@ -65,6 +76,19 @@ def inbound(body: LotIn):
         "INSERT INTO lots(item_id,qty_in,qty_remain,expiry,status,data_quality) VALUES (?,?,?,?,?,?)",
         (body.item_id, body.qty, body.qty, body.expiry, "on_shelf", "clean"))
     c.commit(); lid = cur.lastrowid; c.close(); return {"id": lid}
+
+@app.post("/api/lots/{lot_id}/remove")
+def remove_lot(lot_id: int):
+    """下架：仅允许已到期批；未到期批拒写，status 保持 on_shelf。"""
+    c = connect()
+    lot = c.execute("SELECT * FROM lots WHERE id=?", (lot_id,)).fetchone()
+    if not lot:
+        c.close(); raise HTTPException(404, "lot")
+    today = date.today().isoformat()
+    if not lot["expiry"] or lot["expiry"] >= today:
+        c.close(); raise HTTPException(409, "not_expired")
+    c.execute("UPDATE lots SET status='removed' WHERE id=?", (lot_id,))
+    c.commit(); c.close(); return {"id": lot_id, "status": "removed"}
 
 class ConsumeIn(BaseModel):
     item_id: int
