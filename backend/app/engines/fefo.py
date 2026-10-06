@@ -1,8 +1,11 @@
-"""FEFO consume: earliest expiry first among positive remaining lots."""
+"""FEFO consume: earliest expiry first among positive remaining lots.
+
+Dirty lots (data_quality='dirty') are quarantined: never ordinary FEFO candidates.
+"""
 
 def sort_lots_fefo(lots: list[dict]) -> list[dict]:
     return sorted(
-        [l for l in lots if float(l.get("qty_remain", 0)) > 0],
+        [l for l in lots if float(l.get("qty_remain", 0)) > 0 and l.get("data_quality") != "dirty"],
         key=lambda l: (l.get("expiry") or "9999-99-99", l.get("id") or 0),
     )
 

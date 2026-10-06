@@ -56,8 +56,19 @@ class LotIn(BaseModel):
     qty: float
     expiry: str
 
+def _expiry_ok(s: str) -> bool:
+    # strict YYYY-MM-DD that round-trips (rejects 2026-13-40, 20261001, garbage)
+    try:
+        return bool(s) and date.fromisoformat(s).isoformat() == s
+    except (ValueError, TypeError):
+        return False
+
 @app.post("/api/lots")
 def inbound(body: LotIn):
+    if body.qty <= 0:
+        raise HTTPException(400, "qty_non_positive")
+    if not _expiry_ok(body.expiry):
+        raise HTTPException(400, "bad_expiry")
     c = connect()
     item = c.execute("SELECT id FROM items WHERE id=?", (body.item_id,)).fetchone()
     if not item: c.close(); raise HTTPException(404, "item")
@@ -75,7 +86,8 @@ class ConsumeIn(BaseModel):
 def consume(body: ConsumeIn):
     c = connect()
     lots = [dict(r) for r in c.execute(
-        "SELECT * FROM lots WHERE item_id=? AND status='on_shelf' AND qty_remain>0", (body.item_id,))]
+        """SELECT * FROM lots WHERE item_id=? AND status='on_shelf' AND qty_remain>0
+           AND COALESCE(data_quality,'clean')='clean'""", (body.item_id,))]
     result = consume_fefo(lots, body.qty)
     if not result["ok"] and result["reason"] == "qty_non_positive":
         c.close(); raise HTTPException(400, result["reason"])
@@ -98,6 +110,19 @@ def expire_sweep():
     for i in ids:
         c.execute("UPDATE lots SET status='expired' WHERE id=?", (i,))
     c.commit(); c.close(); return {"expired_ids": ids}
+
+@app.post("/api/lots/{lot_id}/pull")
+def pull_lot(lot_id: int):
+    """单批提交下架: 仅允许已到期批, 未到期一律 409 且状态不变."""
+    c = connect()
+    lot = c.execute("SELECT * FROM lots WHERE id=?", (lot_id,)).fetchone()
+    if not lot: c.close(); raise HTTPException(404, "lot")
+    if lot["status"] != "on_shelf":
+        c.close(); raise HTTPException(409, "not_on_shelf")
+    if not lot["expiry"] or lot["expiry"] >= date.today().isoformat():
+        c.close(); raise HTTPException(409, "not_expired")
+    c.execute("UPDATE lots SET status='expired' WHERE id=?", (lot_id,))
+    c.commit(); c.close(); return {"id": lot_id, "status": "expired"}
 
 @app.get("/api/settings")
 def settings():
